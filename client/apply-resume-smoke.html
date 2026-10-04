@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Application resume smoke test</title></head>
+<body><pre id="result">Running application resume test...</pre>
+<script>
+(async () => {
+  const base = 'http://localhost:5000';
+  const email = `apply-resume-${Date.now()}@example.test`;
+  const password = 'Apply-Smoke-42!';
+  const resumeData = 'data:application/pdf;base64,JVBERi0xLjQKJSVFT0Y=';
+  const results = [];
+  let accountCreated = false;
+  const request = async (path, method = 'GET', body) => {
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { response, data: await response.json().catch(() => ({})) };
+  };
+  const check = (condition, message) => {
+    if (!condition) throw new Error(message);
+    results.push(`PASS ${message}`);
+  };
+
+  try {
+    let result = await request('/api/auth/signup', 'POST', {
+      fullName: 'API Candidate', email, password, role: 'Veterinarian',
+    });
+    check(result.response.status === 201, 'candidate account created');
+    accountCreated = true;
+
+    result = await request('/api/profile', 'PUT', {
+      email, currentPassword: password, fullName: 'API Candidate', businessDetails: {}, avatarData: '',
+      phone: '+91 90000 11111', location: 'Pune, India', qualifications: 'DVM, emergency care',
+      resumeName: 'candidate-resume.pdf', resumeData,
+    });
+    check(result.response.ok && result.data.user.phone === '+91 90000 11111' && result.data.user.resumeData === resumeData, 'profile contact and PDF resume saved');
+
+    result = await request('/api/apply', 'POST', {
+      name: result.data.user.fullName, email: result.data.user.email, phone: result.data.user.phone,
+      location: result.data.user.location, qualifications: result.data.user.qualifications,
+      resumeName: result.data.user.resumeName, resumeData: result.data.user.resumeData,
+      role: result.data.user.role, jobTitle: 'Resume Smoke Role', message: 'Testing resume submission',
+    });
+    check(result.response.status === 201, 'application accepted with attached PDF');
+
+    result = await request('/api/applications');
+    const saved = result.data.applications.find((application) => application.name === 'API Candidate');
+    check(Boolean(saved), 'application appears in recruiter list');
+    check(!('email' in saved) && !('phone' in saved) && !('resumeData' in saved), 'applicant list hides private contact and resume data');
+
+    result = await request('/api/apply', 'POST', {
+      name: 'API Candidate', email, phone: '+91 90000 11111', jobTitle: 'Invalid Resume Role',
+      resumeName: 'bad.pdf', resumeData: 'data:application/pdf;base64,bm90YSBwZGY=',
+    });
+    check(result.response.status === 400, 'invalid PDF payload rejected');
+  } catch (error) {
+    results.push(`FAIL ${error.message}`);
+  } finally {
+    if (accountCreated) {
+      try {
+        const cleanup = await request('/api/profile', 'DELETE', { email, currentPassword: password });
+        results.push(cleanup.response.ok ? 'CLEANUP test account and application removed' : 'CLEANUP deletion request failed');
+      } catch (error) {
+        results.push(`CLEANUP error: ${error.message}`);
+      }
+    }
+    document.getElementById('result').textContent = results.join('\n');
+  }
+})();
+</script>
+</body>
+</html>

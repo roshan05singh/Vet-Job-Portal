@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-const API_URL = 'https://vet-job-portal-9zqk.vercel.app/';
+const API_URL = 'https://vet-job-portal-9zqk.vercel.app';
 
 const fallbackJobs = [
   {

@@ -64,7 +64,10 @@ const emptyBusinessDetails = {
   registrationNumber: '',
 };
 
+const loadSavedToken = () => localStorage.getItem('vetreliefToken') || '';
+
 const loadSavedUser = () => {
+  if (!loadSavedToken()) return null;
   try {
     return JSON.parse(localStorage.getItem('vetreliefUser') || 'null');
   } catch {
@@ -75,6 +78,7 @@ const loadSavedUser = () => {
 function App() {
   const [authMode, setAuthMode] = useState('login');
   const [currentUser, setCurrentUser] = useState(loadSavedUser);
+  const [authToken, setAuthToken] = useState(loadSavedToken);
   const [jobs, setJobs] = useState(fallbackJobs);
   const [selectedJob, setSelectedJob] = useState(fallbackJobs[0]);
   const [applicants, setApplicants] = useState([]);
@@ -115,7 +119,6 @@ function App() {
     ...loadSavedUser()?.businessDetails,
   }));
   const [deletingJobId, setDeletingJobId] = useState('');
-  const [jobDeletePassword, setJobDeletePassword] = useState('');
   const [statusMessage, setStatusMessage] = useState({ type: '', text: '' });
 
   const myJobs = currentUser
@@ -126,6 +129,11 @@ function App() {
     if (currentUser) localStorage.setItem('vetreliefUser', JSON.stringify(currentUser));
     else localStorage.removeItem('vetreliefUser');
   }, [currentUser]);
+
+  useEffect(() => {
+    if (authToken) localStorage.setItem('vetreliefToken', authToken);
+    else localStorage.removeItem('vetreliefToken');
+  }, [authToken]);
 
   useEffect(() => {
     if (!applicationFormOpen || !currentUser) return;
@@ -282,6 +290,7 @@ function App() {
         : data.message || 'Account created successfully.';
       setStatusMessage({ type: 'success', text: successMessage });
       setCurrentUser(data.user);
+      setAuthToken(data.token || '');
       setBusinessForm({ ...emptyBusinessDetails, ...data.user.businessDetails });
       setAuthForm({ fullName: '', email: '', password: '', role: 'Veterinarian' });
     } catch (error) {
@@ -292,16 +301,19 @@ function App() {
 
   const handleJobSubmit = async (event) => {
     event.preventDefault();
+    if (!currentUser || !authToken) {
+      setStatusMessage({ type: 'error', text: 'Please sign in before posting a job.' });
+      return;
+    }
 
     try {
       const response = await fetch(`${API_URL}/api/jobs`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
         body: JSON.stringify({
           ...jobForm,
           tags: jobForm.tags,
           requirements: jobForm.requirements,
-          recruiterEmail: currentUser?.email || '',
           businessDetails: businessForm,
         }),
       });
@@ -309,6 +321,10 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          setCurrentUser(null);
+          setAuthToken('');
+        }
         setStatusMessage({ type: 'error', text: data.message || 'Unable to post job.' });
         return;
       }
@@ -336,17 +352,20 @@ function App() {
 
   const handleJobDelete = async (event) => {
     event.preventDefault();
-    if (!currentUser || !deletingJobId || !jobDeletePassword) return;
+    if (!currentUser || !authToken || !deletingJobId) return;
 
     try {
       const response = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(deletingJobId)}`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: currentUser.email, password: jobDeletePassword }),
+        headers: { Authorization: `Bearer ${authToken}` },
       });
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          setCurrentUser(null);
+          setAuthToken('');
+        }
         setStatusMessage({ type: 'error', text: data.message || 'Unable to delete the job post.' });
         return;
       }
@@ -357,7 +376,6 @@ function App() {
         setSelectedJob(remainingJobs[0] || fallbackJobs[0]);
       }
       setDeletingJobId('');
-      setJobDeletePassword('');
       setStatusMessage({ type: 'success', text: 'Your job post was deleted.' });
     } catch (error) {
       setStatusMessage({ type: 'error', text: 'Unable to connect to the server.' });
@@ -400,7 +418,7 @@ function App() {
       }
 
       setApplicants((prev) => [
-        { name: payload.name, role: payload.jobTitle, status: 'New Application' },
+        { name: payload.name, role: payload.jobTitle, status: 'Applying' },
         ...prev,
       ]);
       setApplicationFormOpen(false);
@@ -432,7 +450,7 @@ function App() {
           {currentUser ? (
             <>
               <Link className="btn btn-secondary" to="/profile">Profile</Link>
-              <button className="btn btn-secondary" onClick={() => setCurrentUser(null)}>Sign out</button>
+              <button className="btn btn-secondary" onClick={() => { setCurrentUser(null); setAuthToken(''); }}>Sign out</button>
             </>
           ) : (
             <a className="btn btn-secondary" href="#about">Log in</a>
@@ -746,12 +764,9 @@ function App() {
                         </div>
                         {deletingJobId === jobId ? (
                           <form className="job-delete-confirm" onSubmit={handleJobDelete}>
-                            <label>
-                              Confirm password
-                              <input type="password" value={jobDeletePassword} onChange={(event) => setJobDeletePassword(event.target.value)} required autoComplete="current-password" />
-                            </label>
+                            <span>Delete this post?</span>
                             <button className="btn btn-danger small" type="submit">Confirm delete</button>
-                            <button className="btn btn-secondary small" type="button" onClick={() => { setDeletingJobId(''); setJobDeletePassword(''); }}>Cancel</button>
+                            <button className="btn btn-secondary small" type="button" onClick={() => setDeletingJobId('')}>Cancel</button>
                           </form>
                         ) : (
                           <button className="btn btn-danger small" type="button" onClick={() => setDeletingJobId(jobId)}>Delete post</button>

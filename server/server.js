@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
-const { createHash, randomBytes, scrypt: scryptCallback, timingSafeEqual } = require('crypto');
+const { createHash, createHmac, randomBytes, scrypt: scryptCallback, timingSafeEqual } = require('crypto');
 const { promisify } = require('util');
 const Application = require('./models/Application');
 const Job = require('./models/Job');
@@ -15,6 +15,8 @@ const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/vetrelief';
 const MAX_AVATAR_BYTES = 1024 * 1024;
 const MAX_RESUME_BYTES = 2 * 1024 * 1024;
+const AUTH_TOKEN_SECRET = process.env.AUTH_TOKEN_SECRET || process.env.MONGO_URI || randomBytes(32).toString('hex');
+const AUTH_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 const app = express();
 
 const jobs = [
@@ -131,6 +133,51 @@ const verifyPassword = async (password, passwordHash) => {
   return timingSafeEqual(expectedKey, suppliedKey);
 };
 
+const createAuthToken = (user) => {
+  const payload = Buffer.from(JSON.stringify({
+    sub: String(user._id || user.id),
+    exp: Math.floor(Date.now() / 1000) + AUTH_TOKEN_LIFETIME_SECONDS,
+  })).toString('base64url');
+  const signature = createHmac('sha256', AUTH_TOKEN_SECRET).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+};
+
+const authenticateUser = async (req, res, next) => {
+  const authorization = String(req.headers.authorization || '');
+  const match = authorization.match(/^Bearer\s+([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
+  if (!match) return res.status(401).json({ message: 'Please sign in to continue.' });
+
+  try {
+    const [payload, suppliedSignature] = match[1].split('.');
+    const expectedSignature = createHmac('sha256', AUTH_TOKEN_SECRET).update(payload).digest();
+    const actualSignature = Buffer.from(suppliedSignature, 'base64url');
+    if (actualSignature.length !== expectedSignature.length || !timingSafeEqual(actualSignature, expectedSignature)) {
+      return res.status(401).json({ message: 'Your sign-in has expired. Please sign in again.' });
+    }
+
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!claims.sub || !Number.isFinite(claims.exp) || claims.exp <= Math.floor(Date.now() / 1000)) {
+      return res.status(401).json({ message: 'Your sign-in has expired. Please sign in again.' });
+    }
+
+    let user;
+    if (mongoose.connection.readyState === 1) {
+      if (!mongoose.isValidObjectId(claims.sub)) {
+        return res.status(401).json({ message: 'Please sign in to continue.' });
+      }
+      user = await User.findById(claims.sub);
+    } else {
+      user = users.find((item) => String(item.id) === String(claims.sub));
+    }
+
+    if (!user) return res.status(401).json({ message: 'Please sign in to continue.' });
+    req.user = user;
+    return next();
+  } catch (error) {
+    return res.status(401).json({ message: 'Please sign in to continue.' });
+  }
+};
+
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
@@ -181,8 +228,8 @@ app.get('/api/applications', async (req, res) => {
   }
 });
 
-app.post('/api/jobs', async (req, res) => {
-  const { title, clinic, location, type, pay, schedule, tags, description, requirements, businessDetails, recruiterEmail } = req.body;
+app.post('/api/jobs', authenticateUser, async (req, res) => {
+  const { title, clinic, location, type, pay, schedule, tags, description, requirements, businessDetails } = req.body;
 
   if (!title || !clinic) {
     return res.status(400).json({ message: 'Job title and clinic name are required.' });
@@ -199,7 +246,7 @@ app.post('/api/jobs', async (req, res) => {
     tags: toList(tags),
     description: description || 'New veterinary staffing opportunity.',
     requirements: toList(requirements),
-    recruiterEmail: String(recruiterEmail || '').trim().toLowerCase(),
+    recruiterEmail: String(req.user.email || '').trim().toLowerCase(),
     businessDetails: sanitizeBusinessDetails(businessDetails),
   };
 
@@ -230,22 +277,9 @@ app.post('/api/jobs', async (req, res) => {
   return res.status(201).json({ message: 'Job posted successfully.', job: newJob, jobs });
 });
 
-app.delete('/api/jobs/:jobId', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const password = String(req.body.password || '');
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Account email and password are required to delete a job.' });
-  }
-
+app.delete('/api/jobs/:jobId', authenticateUser, async (req, res) => {
+  const email = String(req.user.email || '').trim().toLowerCase();
   try {
-    const user = mongoose.connection.readyState === 1
-      ? await User.findOne({ email })
-      : users.find((item) => item.email.toLowerCase() === email);
-
-    if (!user || !(await verifyPassword(password, user.passwordHash))) {
-      return res.status(401).json({ message: 'Account email or password is incorrect.' });
-    }
-
     if (mongoose.connection.readyState === 1) {
       if (!mongoose.isValidObjectId(req.params.jobId)) {
         return res.status(404).json({ message: 'Job post not found for this account.' });
@@ -267,18 +301,106 @@ app.delete('/api/jobs/:jobId', async (req, res) => {
   }
 });
 
+
+  app.patch('/api/applications/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = [
+      'Applied',
+      'Under Review',
+      'Shortlisted',
+      'Interview',
+      'Selected',
+      'Rejected'
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: 'Invalid application status.'
+      });
+    }
+
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        message: 'Database is not connected.'
+      });
+    }
+
+    const application = await Application.findByIdAndUpdate(
+      id,
+      { status },
+      { new: true, runValidators: true }
+    );
+
+    if (!application) {
+      return res.status(404).json({
+        message: 'Application not found.'
+      });
+    }
+
+    res.json({
+      message: 'Application status updated successfully.',
+      application: {
+        id: application._id,
+        name: application.name,
+        role: application.role,
+        jobTitle: application.jobTitle,
+        status: application.status,
+        createdAt: application.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error updating application status:', error.message);
+
+    res.status(500).json({
+      message: 'Unable to update application status.'
+    });
+  }
+});
+
+
 app.post('/api/apply', async (req, res) => {
-  const { name, email, phone, location, qualifications, resumeName, resumeData, role, jobTitle, message } = req.body;
+  const {
+    name,
+    email,
+    phone,
+    location,
+    qualifications,
+    resumeName,
+    resumeData,
+    role,
+    jobTitle,
+    message
+  } = req.body;
 
   if (!name || !email || !phone || !jobTitle || !resumeName || !resumeData) {
-    return res.status(400).json({ message: 'Name, email, phone, job title, and a PDF resume are required.' });
+    return res.status(400).json({
+      message: 'Name, email, phone, job title, and a PDF resume are required.'
+    });
   }
 
-  const resumeMatch = String(resumeData).match(/^data:application\/pdf;base64,([A-Za-z0-9+/]+={0,2})$/);
-  if (!resumeMatch) return res.status(400).json({ message: 'Resume must be a PDF file.' });
+  const resumeMatch = String(resumeData).match(
+    /^data:application\/pdf;base64,([A-Za-z0-9+/]+={0,2})$/
+  );
+
+  if (!resumeMatch) {
+    return res.status(400).json({
+      message: 'Resume must be a PDF file.'
+    });
+  }
+
   const resumeBuffer = Buffer.from(resumeMatch[1], 'base64');
-  if (resumeBuffer.length > MAX_RESUME_BYTES || !resumeBuffer.toString('utf8', 0, 5).startsWith('%PDF-')) {
-    return res.status(400).json({ message: 'Resume must be a valid PDF under 2 MB.' });
+
+  if (
+    resumeBuffer.length > MAX_RESUME_BYTES ||
+    !resumeBuffer.toString('utf8', 0, 5).startsWith('%PDF-')
+  ) {
+    return res.status(400).json({
+      message: 'Resume must be a valid PDF under 2 MB.'
+    });
   }
 
   const applicationData = {
@@ -287,22 +409,35 @@ app.post('/api/apply', async (req, res) => {
     phone: String(phone).trim(),
     location: String(location || '').trim(),
     qualifications: String(qualifications || '').trim(),
-    resumeName: String(resumeName).split(/[\\/]/).pop().slice(0, 255),
+    resumeName: String(resumeName)
+      .split(/[\\/]/)
+      .pop()
+      .slice(0, 255),
     resumeData: String(resumeData),
     role: role || 'Veterinarian',
     jobTitle: String(jobTitle).trim(),
     message: message || '',
-    status: 'New Application',
+
+    // Application Tracker
+    status: 'Applied',
   };
 
-  if (!applicationData.name || !applicationData.email || !applicationData.phone || !applicationData.jobTitle) {
-  return res.status(400).json({ message: 'Name, email, phone, and job title are required.' });
+  if (
+    !applicationData.name ||
+    !applicationData.email ||
+    !applicationData.phone ||
+    !applicationData.jobTitle
+  ) {
+    return res.status(400).json({
+      message: 'Name, email, phone, and job title are required.'
+    });
   }
 
   if (mongoose.connection.readyState === 1) {
     try {
       const application = await Application.create(applicationData);
       const total = await Application.countDocuments();
+
       return res.status(201).json({
         message: 'Application submitted successfully.',
         application: {
@@ -316,17 +451,26 @@ app.post('/api/apply', async (req, res) => {
         total,
       });
     } catch (error) {
-      console.error('Error creating application in MongoDB:', error.message);
-      return res.status(500).json({ message: 'Unable to save the application.' });
+      console.error(
+        'Error creating application in MongoDB:',
+        error.message
+      );
+
+      return res.status(500).json({
+        message: 'Unable to save the application.'
+      });
     }
   }
 
+  // Fallback when MongoDB is not connected
   const application = {
     id: applications.length ? applications[0].id + 1 : 1,
     ...applicationData,
     createdAt: new Date().toISOString(),
   };
+
   applications.unshift(application);
+
   return res.status(201).json({
     message: 'Application submitted successfully.',
     application: {
@@ -342,297 +486,120 @@ app.post('/api/apply', async (req, res) => {
 });
 
 app.post('/api/auth/signup', async (req, res) => {
-  const { fullName, email, password, role } = req.body;
+  try {
+    const {
+      fullName,
+      email,
+      password,
+      role,
+      businessDetails,
+    } = req.body;
 
-  if (!fullName || !email || !password) {
-    return res.status(400).json({ message: 'Full name, email, and password are required.' });
-  }
-
-  if (mongoose.connection.readyState === 1) {
-    try {
-      const existingUser = await User.findOne({ email: email.toLowerCase() });
-      if (existingUser) {
-        return res.status(409).json({ message: 'An account already exists with this email.' });
-      }
-
-      const user = await User.create({
-        fullName,
-        email: email.toLowerCase(),
-        passwordHash: await hashPassword(password),
-        role: role || 'Veterinarian',
+    if (!fullName || !email || !password || !role) {
+      return res.status(400).json({
+        message: 'Full name, email, password, and role are required.',
       });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        message: 'Password must be at least 6 characters long.',
+      });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const existingUser = mongoose.connection.readyState === 1
+      ? await User.findOne({ email: normalizedEmail })
+      : users.find((item) => item.email.toLowerCase() === normalizedEmail);
+
+    if (existingUser) {
+      return res.status(409).json({
+        message: 'An account with this email already exists.',
+      });
+    }
+
+    const passwordHash = await hashPassword(password);
+
+    const userData = {
+      fullName: String(fullName).trim(),
+      email: normalizedEmail,
+      passwordHash,
+      role,
+      businessDetails: sanitizeBusinessDetails(businessDetails),
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      const user = await User.create(userData);
 
       return res.status(201).json({
         message: 'Account created successfully.',
         user: toPublicUser(user),
+        token: createAuthToken(user),
       });
-    } catch (error) {
-      console.error('Error creating user in MongoDB:', error.message);
-      return res.status(500).json({ message: 'Unable to create account.' });
     }
+
+    const user = {
+      id: randomBytes(12).toString('hex'),
+      ...userData,
+    };
+
+    users.push(user);
+
+    return res.status(201).json({
+      message: 'Account created successfully.',
+      user: toPublicUser(user),
+      token: createAuthToken(user),
+    });
+  } catch (error) {
+    console.error('Error creating account:', error.message);
+
+    return res.status(500).json({
+      message: 'Unable to create the account.',
+    });
   }
-
-  const existingUser = users.find((user) => user.email.toLowerCase() === email.toLowerCase());
-  if (existingUser) {
-    return res.status(409).json({ message: 'An account already exists with this email.' });
-  }
-
-  const user = {
-    id: users.length ? users[users.length - 1].id + 1 : 1,
-    fullName,
-    email,
-    passwordHash: await hashPassword(password),
-    role: role || 'Veterinarian',
-  };
-
-  users.push(user);
-
-  return res.status(201).json({
-    message: 'Account created successfully.',
-    user: { id: user.id, fullName: user.fullName, email: user.email, role: user.role },
-  });
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
-  if (mongoose.connection.readyState === 1) {
-    try {
-      const user = await User.findOne({ email: String(email).toLowerCase() });
-      if (!user || !(await verifyPassword(password, user.passwordHash))) {
-        return res.status(401).json({ message: 'Invalid email or password.' });
-      }
-
-      return res.json({
-        message: 'Login successful.',
-        user: toPublicUser(user),
-      });
-    } catch (error) {
-      console.error('Error logging in user:', error.message);
-      return res.status(500).json({ message: 'Unable to log in.' });
-    }
-  }
-
-  const user = users.find((item) => item.email.toLowerCase() === String(email).toLowerCase());
-
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
-    return res.status(401).json({ message: 'Invalid email or password.' });
-  }
-
-  return res.json({ message: 'Login successful.', user: toPublicUser(user) });
-});
-
-app.put('/api/profile', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const currentPassword = req.body.currentPassword;
-  const fullName = String(req.body.fullName || '').trim();
-  const avatarData = String(req.body.avatarData || '');
-  const resumeData = String(req.body.resumeData || '');
-  const resumeName = String(req.body.resumeName || '').split(/[\\/]/).pop().slice(0, 255);
-
-  if (avatarData) {
-    const avatarMatch = avatarData.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
-    if (!avatarMatch || Buffer.from(avatarMatch[2], 'base64').length > MAX_AVATAR_BYTES) {
-      return res.status(400).json({ message: 'Profile photo must be a PNG, JPEG, or WebP image under 1 MB.' });
-    }
-  }
-
-  if (resumeData) {
-    const resumeMatch = resumeData.match(/^data:application\/pdf;base64,([A-Za-z0-9+/]+={0,2})$/);
-    if (!resumeMatch) return res.status(400).json({ message: 'Resume must be a PDF file.' });
-    const resumeBuffer = Buffer.from(resumeMatch[1], 'base64');
-    if (resumeBuffer.length > MAX_RESUME_BYTES || !resumeBuffer.toString('utf8', 0, 5).startsWith('%PDF-') || !resumeName) {
-      return res.status(400).json({ message: 'Resume must be a valid PDF under 2 MB.' });
-    }
-  }
-
-  if (!email || !currentPassword || !fullName) {
-    return res.status(400).json({ message: 'Email, current password, and username are required.' });
-  }
-
   try {
     const user = mongoose.connection.readyState === 1
       ? await User.findOne({ email })
       : users.find((item) => item.email.toLowerCase() === email);
 
-    if (!user || !(await verifyPassword(currentPassword, user.passwordHash))) {
-      return res.status(401).json({ message: 'Current password is incorrect.' });
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      return res.status(401).json({ message: 'Invalid email or password.' });
     }
 
-    user.fullName = fullName;
-    user.businessDetails = sanitizeBusinessDetails(req.body.businessDetails);
-    user.avatarData = avatarData;
-    user.phone = String(req.body.phone || '').trim();
-    user.location = String(req.body.location || '').trim();
-    user.qualifications = String(req.body.qualifications || '').trim();
-    user.resumeName = resumeData ? resumeName : '';
-    user.resumeData = resumeData;
-    if (mongoose.connection.readyState === 1) await user.save();
-
-    return res.json({ message: 'Profile updated successfully.', user: toPublicUser(user) });
-  } catch (error) {
-    console.error('Error updating profile:', error.message);
-    return res.status(500).json({ message: 'Unable to update profile.' });
-  }
-});
-
-app.delete('/api/profile', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const currentPassword = req.body.currentPassword;
-
-  if (!email || !currentPassword) {
-    return res.status(400).json({ message: 'Email and current password are required.' });
-  }
-
-  try {
-    const user = mongoose.connection.readyState === 1
-      ? await User.findOne({ email })
-      : users.find((item) => item.email.toLowerCase() === email);
-
-    if (!user || !(await verifyPassword(currentPassword, user.passwordHash))) {
-      return res.status(401).json({ message: 'Current password is incorrect.' });
-    }
-
-    if (mongoose.connection.readyState === 1) {
-      await Promise.all([
-        User.deleteOne({ _id: user._id }),
-        Application.deleteMany({ email }),
-        Job.deleteMany({ recruiterEmail: email }),
-      ]);
-    } else {
-      users.splice(users.indexOf(user), 1);
-      for (let index = applications.length - 1; index >= 0; index -= 1) {
-        if (applications[index].email.toLowerCase() === email) applications.splice(index, 1);
-      }
-      for (let index = jobs.length - 1; index >= 0; index -= 1) {
-        if (jobs[index].recruiterEmail === email) jobs.splice(index, 1);
-      }
-    }
-
-    return res.json({ message: 'Account and associated records were deleted.' });
-  } catch (error) {
-    console.error('Error deleting account:', error.message);
-    return res.status(500).json({ message: 'Unable to delete account.' });
-  }
-});
-
-app.post('/api/auth/forgot-password', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  if (!email) return res.status(400).json({ message: 'Email address is required.' });
-
-  const resetToken = randomBytes(32).toString('hex');
-  const resetTokenHash = createHash('sha256').update(resetToken).digest('hex');
-  const resetTokenExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-  try {
-    const user = mongoose.connection.readyState === 1
-      ? await User.findOne({ email })
-      : users.find((item) => item.email.toLowerCase() === email);
-
-    if (user) {
-      user.resetTokenHash = resetTokenHash;
-      user.resetTokenExpiresAt = resetTokenExpiresAt;
-      if (mongoose.connection.readyState === 1) await user.save();
-    }
-
-    const response = { message: 'If that account exists, reset instructions are ready.' };
-    if (user && process.env.NODE_ENV !== 'production') response.resetToken = resetToken;
-    return res.json(response);
-  } catch (error) {
-    console.error('Error requesting password reset:', error.message);
-    return res.status(500).json({ message: 'Unable to request a password reset.' });
-  }
-});
-
-app.post('/api/auth/reset-password', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const resetToken = String(req.body.resetToken || '');
-  const newPassword = String(req.body.newPassword || '');
-
-  if (!email || !resetToken || newPassword.length < 8) {
-    return res.status(400).json({ message: 'Email, reset code, and a password of at least 8 characters are required.' });
-  }
-
-  try {
-    const user = mongoose.connection.readyState === 1
-      ? await User.findOne({ email })
-      : users.find((item) => item.email.toLowerCase() === email);
-    const suppliedHash = createHash('sha256').update(resetToken).digest();
-    const storedHash = user?.resetTokenHash ? Buffer.from(user.resetTokenHash, 'hex') : Buffer.alloc(0);
-    const tokenMatches = storedHash.length === suppliedHash.length && timingSafeEqual(storedHash, suppliedHash);
-
-    if (!user || !tokenMatches || !user.resetTokenExpiresAt || user.resetTokenExpiresAt <= new Date()) {
-      return res.status(400).json({ message: 'Reset code is invalid or expired.' });
-    }
-
-    user.passwordHash = await hashPassword(newPassword);
-    user.resetTokenHash = '';
-    user.resetTokenExpiresAt = null;
-    if (mongoose.connection.readyState === 1) await user.save();
-
-    return res.json({ message: 'Password reset successfully. You can now sign in.' });
-  } catch (error) {
-    console.error('Error resetting password:', error.message);
-    return res.status(500).json({ message: 'Unable to reset password.' });
-  }
-});
-
-const seedDemoJobs = async () => {
-  try {
-    const count = await Job.countDocuments();
-    const legacyCompensationJobs = await Job.find({
-      $or: [{ pay: /\$/ }, { pay: { $not: /^\s*₹/ } }],
+    return res.json({
+      message: 'Login successful.',
+      user: toPublicUser(user),
+      token: createAuthToken(user),
     });
-    for (const job of legacyCompensationJobs) {
-      job.pay = formatINRCompensation(job.pay);
-      await job.save();
-    }
-    if (count > 0) return;
-
-    await Job.insertMany(
-      jobs.map((job) => ({
-        title: job.title,
-        clinic: job.clinic,
-        location: job.location,
-        type: job.type,
-        pay: job.pay,
-        schedule: job.schedule,
-        tags: job.tags,
-        description: job.description,
-        requirements: job.requirements,
-      })),
-    );
-
-    console.log('Seeded demo jobs into MongoDB.');
   } catch (error) {
-    console.error('Seed failed:', error.message);
+    console.error('Error logging in user:', error.message);
+    return res.status(500).json({ message: 'Unable to log in.' });
   }
-};
-
+});
 const startServer = async () => {
   try {
-    if (process.env.MONGO_URI || true) {
-      try {
-        await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 3000 });
-        console.log('MongoDB connected');
-        await seedDemoJobs();
-      } catch (dbError) {
-        console.warn('MongoDB not available. Running without database connection.');
-        console.warn(dbError.message);
-      }
-    }
+    await mongoose.connect(MONGO_URI);
+    console.log('MongoDB connected successfully.');
 
     app.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`VetRelief backend running on port ${PORT}`);
     });
   } catch (error) {
-    console.error('Server error:', error.message);
-    process.exit(1);
+    console.error('MongoDB connection failed:', error.message);
+
+    app.listen(PORT, () => {
+      console.log(`VetRelief backend running on port ${PORT} without MongoDB`);
+    });
   }
 };
-
 startServer();

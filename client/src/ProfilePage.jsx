@@ -189,6 +189,7 @@ function ProfilePage() {
         return;
       }
       localStorage.removeItem('vetreliefUser');
+      localStorage.removeItem('vetreliefToken');
       setUser(null);
       navigate('/', { replace: true });
     } catch {
@@ -198,6 +199,7 @@ function ProfilePage() {
 
   const handleSignOut = () => {
     localStorage.removeItem('vetreliefUser');
+    localStorage.removeItem('vetreliefToken');
     setUser(null);
     navigate('/', { replace: true });
   };

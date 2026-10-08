@@ -11,7 +11,11 @@ const applicationSchema = new mongoose.Schema({
   role: { type: String, default: 'Veterinarian' },
   jobTitle: { type: String, required: true, trim: true },
   message: { type: String, default: '' },
-  status: { type: String, default: 'New Application' },
+  status: {
+  type: String,
+  enum: ['Applied', 'Under Review', 'Shortlisted', 'Interview', 'Selected', 'Rejected'],
+  default: 'Applied'
+},
   createdAt: { type: Date, default: Date.now },
 });
 

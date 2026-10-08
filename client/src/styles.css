@@ -766,23 +766,8 @@ button {
 .job-delete-confirm {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto auto;
-  align-items: end;
+  align-items: center;
   gap: 8px;
-}
-
-.job-delete-confirm label {
-  display: grid;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 0.76rem;
-  font-weight: 700;
-}
-
-.job-delete-confirm input {
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
 }
 
 .applicant-panel,

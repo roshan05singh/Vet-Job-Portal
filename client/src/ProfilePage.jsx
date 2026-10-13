@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
-const API_URL = 'http://localhost:5000';
+const API_URL = String(import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
 
 const emptyBusinessDetails = {
   businessName: '',
@@ -11,7 +11,30 @@ const emptyBusinessDetails = {
   website: '',
   address: '',
   registrationNumber: '',
+  description: '',
+  specializations: '',
+  facilities: '',
+  teamInformation: '',
+  logoData: '',
 };
+
+const listInput = (value) => Array.isArray(value) ? value.join(', ') : String(value || '');
+const createBusinessForm = (details = {}) => ({
+  ...emptyBusinessDetails,
+  ...details,
+  specializations: listInput(details.specializations),
+  facilities: listInput(details.facilities),
+});
+const createCandidateForm = (user = {}) => ({
+  phone: user.phone || '', location: user.location || '', qualifications: user.qualifications || '',
+  professionalSummary: user.professionalSummary || '', specializations: listInput(user.specializations),
+  experienceYears: user.experienceYears ?? '', skills: listInput(user.skills), certifications: listInput(user.certifications),
+  employmentHistory: listInput(user.employmentHistory), preferredLocations: listInput(user.preferredLocations),
+  preferredEmploymentTypes: listInput(user.preferredEmploymentTypes),
+  salaryExpectationMin: user.salaryExpectationMin ?? '', salaryExpectationMax: user.salaryExpectationMax ?? '',
+  salaryExpectationCurrency: user.salaryExpectationCurrency || 'INR', availability: user.availability || '',
+  profileVisibility: user.profileVisibility || 'employers', resumeName: user.resumeName || '', resumeData: user.resumeData || '',
+});
 
 const readUser = () => {
   try {
@@ -25,15 +48,9 @@ function ProfilePage() {
   const navigate = useNavigate();
   const [user, setUser] = useState(readUser);
   const [fullName, setFullName] = useState(user?.fullName || '');
-  const [businessDetails, setBusinessDetails] = useState({ ...emptyBusinessDetails, ...user?.businessDetails });
+  const [businessDetails, setBusinessDetails] = useState(() => createBusinessForm(user?.businessDetails));
   const [avatarData, setAvatarData] = useState(user?.avatarData || '');
-  const [candidateProfile, setCandidateProfile] = useState({
-    phone: user?.phone || '',
-    location: user?.location || '',
-    qualifications: user?.qualifications || '',
-    resumeName: user?.resumeName || '',
-    resumeData: user?.resumeData || '',
-  });
+  const [candidateProfile, setCandidateProfile] = useState(() => createCandidateForm(user));
   const [currentPassword, setCurrentPassword] = useState('');
   const [resetEmail, setResetEmail] = useState(user?.email || '');
   const [resetToken, setResetToken] = useState('');
@@ -48,6 +65,23 @@ function ProfilePage() {
     const dismissTimer = window.setTimeout(() => setNotice({ type: '', text: '' }), 5000);
     return () => window.clearTimeout(dismissTimer);
   }, [notice]);
+
+  useEffect(() => {
+    const token = localStorage.getItem('vetreliefToken');
+    if (!token || !user) return;
+    fetch(`${API_URL}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (!data?.user) return;
+        setUser(data.user);
+        setFullName(data.user.fullName || '');
+        setBusinessDetails(createBusinessForm(data.user.businessDetails));
+        setAvatarData(data.user.avatarData || '');
+        setCandidateProfile(createCandidateForm(data.user));
+        localStorage.setItem('vetreliefUser', JSON.stringify(data.user));
+      })
+      .catch(() => showNotice('error', 'Unable to load your profile from the server.'));
+  }, []);
 
   const showNotice = (type, text) => setNotice({ type, text });
 
@@ -68,6 +102,20 @@ function ProfilePage() {
     const reader = new FileReader();
     reader.onload = () => setAvatarData(String(reader.result || ''));
     reader.onerror = () => showNotice('error', 'Unable to read that image file.');
+    reader.readAsDataURL(file);
+  };
+
+  const handleClinicLogoSelect = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 1024 * 1024) {
+      showNotice('error', 'Choose a PNG, JPEG, or WebP clinic logo under 1 MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setBusinessDetails((previous) => ({ ...previous, logoData: String(reader.result || '') }));
+    reader.onerror = () => showNotice('error', 'Unable to read that clinic logo.');
     reader.readAsDataURL(file);
   };
 
@@ -100,8 +148,8 @@ function ProfilePage() {
     try {
       const response = await fetch(`${API_URL}/api/profile`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: user.email, currentPassword, fullName, businessDetails, avatarData, ...candidateProfile }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('vetreliefToken') || ''}` },
+        body: JSON.stringify({ currentPassword, fullName, businessDetails, avatarData, ...candidateProfile }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -110,15 +158,9 @@ function ProfilePage() {
       }
       setUser(data.user);
       setFullName(data.user.fullName);
-      setBusinessDetails({ ...emptyBusinessDetails, ...data.user.businessDetails });
+      setBusinessDetails(createBusinessForm(data.user.businessDetails));
       setAvatarData(data.user.avatarData || '');
-      setCandidateProfile({
-        phone: data.user.phone || '',
-        location: data.user.location || '',
-        qualifications: data.user.qualifications || '',
-        resumeName: data.user.resumeName || '',
-        resumeData: data.user.resumeData || '',
-      });
+      setCandidateProfile(createCandidateForm(data.user));
       localStorage.setItem('vetreliefUser', JSON.stringify(data.user));
       setCurrentPassword('');
       showNotice('success', data.message);
@@ -140,11 +182,8 @@ function ProfilePage() {
         showNotice('error', data.message || 'Unable to request a password reset.');
         return;
       }
-      setResetToken(data.resetToken || '');
       setResetRequested(true);
-      showNotice('success', data.resetToken
-        ? 'Local reset code created. It expires in 15 minutes.'
-        : data.message);
+      showNotice('success', data.message || 'If the account exists, a reset code has been sent.');
     } catch {
       showNotice('error', 'Unable to connect to the server.');
     }
@@ -180,7 +219,7 @@ function ProfilePage() {
     try {
       const response = await fetch(`${API_URL}/api/profile`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('vetreliefToken') || ''}` },
         body: JSON.stringify({ email: user.email, currentPassword: deletePassword }),
       });
       const data = await response.json();
@@ -304,6 +343,48 @@ function ProfilePage() {
                 <label>Qualifications / specialties
                   <textarea name="qualifications" value={candidateProfile.qualifications} onChange={handleCandidateProfileChange} rows="3" />
                 </label>
+                {user.role !== 'Clinic Owner' && <>
+                  <label>Professional summary
+                    <textarea name="professionalSummary" value={candidateProfile.professionalSummary} onChange={handleCandidateProfileChange} rows="4" maxLength={3000} />
+                  </label>
+                  <label>Specializations (comma separated)
+                    <input name="specializations" value={candidateProfile.specializations} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Years of experience
+                    <input name="experienceYears" type="number" min="0" max="70" step="1" value={candidateProfile.experienceYears} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Skills (comma separated)
+                    <input name="skills" value={candidateProfile.skills} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Certifications (comma separated)
+                    <input name="certifications" value={candidateProfile.certifications} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Employment history (one role per line)
+                    <textarea name="employmentHistory" value={candidateProfile.employmentHistory} onChange={handleCandidateProfileChange} rows="4" />
+                  </label>
+                  <label>Preferred locations (comma separated)
+                    <input name="preferredLocations" value={candidateProfile.preferredLocations} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Preferred employment types (comma separated)
+                    <input name="preferredEmploymentTypes" value={candidateProfile.preferredEmploymentTypes} onChange={handleCandidateProfileChange} placeholder="Full Time, Locum" />
+                  </label>
+                  <label>Minimum salary expectation
+                    <input name="salaryExpectationMin" type="number" min="0" value={candidateProfile.salaryExpectationMin} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Maximum salary expectation
+                    <input name="salaryExpectationMax" type="number" min="0" value={candidateProfile.salaryExpectationMax} onChange={handleCandidateProfileChange} />
+                  </label>
+                  <label>Salary currency
+                    <select name="salaryExpectationCurrency" value={candidateProfile.salaryExpectationCurrency} onChange={handleCandidateProfileChange}><option>INR</option><option>USD</option><option>GBP</option><option>EUR</option></select>
+                  </label>
+                  <label>Availability
+                    <input name="availability" value={candidateProfile.availability} onChange={handleCandidateProfileChange} placeholder="For example, available from June" />
+                  </label>
+                  <label>Profile visibility
+                    <select name="profileVisibility" value={candidateProfile.profileVisibility} onChange={handleCandidateProfileChange}><option value="employers">Share with clinics you apply to</option><option value="private">Hide extended profile details</option></select>
+                    <small>Submitting an application still shares the contact details and qualifications on that application.</small>
+                  </label>
+                </>}
                 <div className="resume-settings">
                   <div>
                     <strong>Resume</strong>
@@ -342,6 +423,22 @@ function ProfilePage() {
                     <label>Registration / license number
                       <input name="registrationNumber" value={businessDetails.registrationNumber} onChange={handleBusinessChange} />
                     </label>
+                    <label>Clinic description
+                      <textarea name="description" value={businessDetails.description} onChange={handleBusinessChange} rows="3" maxLength={2000} />
+                    </label>
+                    <label>Clinic specializations (comma separated)
+                      <input name="specializations" value={businessDetails.specializations} onChange={handleBusinessChange} />
+                    </label>
+                    <label>Facilities (comma separated)
+                      <input name="facilities" value={businessDetails.facilities} onChange={handleBusinessChange} />
+                    </label>
+                    <label>Team information
+                      <textarea name="teamInformation" value={businessDetails.teamInformation} onChange={handleBusinessChange} rows="3" maxLength={2000} />
+                    </label>
+                    <label className="clinic-logo-control">Clinic logo
+                      <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleClinicLogoSelect} />
+                    </label>
+                    {businessDetails.logoData && <button className="btn btn-secondary small" type="button" onClick={() => setBusinessDetails((previous) => ({ ...previous, logoData: '' }))}>Remove clinic logo</button>}
                     <label className="wide-field">Business address
                       <textarea name="address" value={businessDetails.address} onChange={handleBusinessChange} rows="3" />
                     </label>
@@ -356,7 +453,7 @@ function ProfilePage() {
               <section className="account-panel">
                 <div className="account-panel-heading">
                   <span className="panel-index">02</span>
-                  <div><h2>Forgot password?</h2><p>Request a one-time code to set a new password.</p></div>
+                  <div><h2>Forgot password?</h2><p>Request a one-time code by email to set a new password.</p></div>
                 </div>
                 <form className="account-form" onSubmit={handleResetRequest}>
                   <label>Account email
@@ -373,7 +470,7 @@ function ProfilePage() {
                   </label>
                   <button className="btn btn-primary" type="submit">Set new password</button>
                 </form>
-                <p className="account-hint">Local development shows the reset code here. Production email delivery requires SMTP configuration.</p>
+                <p className="account-hint">The code is sent to your account email and expires after 15 minutes. Email delivery must be configured by the platform administrator.</p>
               </section>
 
               <section className="account-panel danger-panel">

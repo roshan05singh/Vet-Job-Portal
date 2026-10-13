@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "VetRelief Veterinary Careers",
+  "short_name": "VetRelief",
+  "description": "Veterinary jobs, applications, and career tools.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f7f5",
+  "theme_color": "#07584f",
+  "icons": [
+    {
+      "src": "/icons/vetrelief.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

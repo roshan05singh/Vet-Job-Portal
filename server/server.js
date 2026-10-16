@@ -319,6 +319,7 @@ app.use(async (req, res, next) => {
     await mongoConnectPromise;
     return next();
   } catch (error) {
+    console.error('MongoDB connection failed in middleware:', error.message);
     return res.status(503).json({ message: 'The service is temporarily unavailable.' });
   }
 });

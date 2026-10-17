@@ -147,6 +147,7 @@ function App() {
   const [appInstalled, setAppInstalled] = useState(false);
 
   const myJobs = currentUser?.role === 'Clinic Owner' ? employerJobs : [];
+  const visibleJobs = jobs;
   const mappableJobs = visibleJobs.filter((job) => job.latitude != null && job.longitude != null);
   const mapJob = selectedJob?.latitude != null && selectedJob?.longitude != null ? selectedJob : mappableJobs[0];
   const filteredApplicants = currentUser?.role === 'Clinic Owner' ? applicants.filter((applicant) => {
@@ -191,8 +192,6 @@ function App() {
       resumeData: currentUser.resumeData || '',
     }));
   }, [applicationFormOpen, currentUser]);
-
-  const visibleJobs = jobs;
 
   useEffect(() => {
     const fetchJobs = async () => {

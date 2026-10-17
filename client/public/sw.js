@@ -18,7 +18,10 @@ self.addEventListener('fetch', (event) => {
 
   if (request.mode === 'navigate') {
     event.respondWith(fetch(request).then((response) => {
-      if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', response.clone()));
+      if (response.ok) {
+        const cachedResponse = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', cachedResponse));
+      }
       return response;
     }).catch(async () => (await caches.match('/index.html')) || Response.error()));
     return;
@@ -26,7 +29,10 @@ self.addEventListener('fetch', (event) => {
 
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(caches.match(request).then((cached) => cached || fetch(request).then((response) => {
-      if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+      if (response.ok) {
+        const cachedResponse = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, cachedResponse));
+      }
       return response;
     })));
   }
